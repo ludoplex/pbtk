@@ -32,81 +32,82 @@ def descpb_to_proto(desc):
     scopes = ['']
     if desc.package:
         out += 'package %s;\n\n' % desc.package
-        scopes[0] += '.' + desc.package
-    
+        scopes[0] += f'.{desc.package}'
+
     for index, dep in enumerate(desc.dependency):
         prefix = ' public' * (index in desc.public_dependency)
         prefix += ' weak' * (index in desc.weak_dependency)
         out += 'import%s "%s";\n' % (prefix, dep)
         scopes.append('.' + ('/' + dep.rsplit('/', 1)[0])[1:].replace('/', '.'))
-    
+
     out += '\n' * (out[-2] != '\n')
-    
+
     out += parse_msg(desc, scopes, desc.syntax).strip('\n')
     name = desc.name.replace('..', '').strip('.\\/')
-    
+
     return name, out + '\n'
 
 def parse_msg(desc, scopes, syntax):
-    out = ''
     is_msg = isinstance(desc, DescriptorProto)
-    
+
     if is_msg:
         scopes = list(scopes)
-        scopes[0] += '.' + desc.name
-    
+        scopes[0] += f'.{desc.name}'
+
     blocks = OrderedDict()
     for nested_msg in (desc.nested_type if is_msg else desc.message_type):
         blocks[nested_msg.name] = parse_msg(nested_msg, scopes, syntax)
-    
+
     for enum in desc.enum_type:
-        out2 = ''
-        for val in enum.value:
-            out2 += '%s = %s;\n' % (val.name, fmt_value(val.number, val.options))
-        
-        if len(set(i.number for i in enum.value)) == len(enum.value):
+        out2 = ''.join(
+            '%s = %s;\n' % (val.name, fmt_value(val.number, val.options))
+            for val in enum.value
+        )
+        if len({i.number for i in enum.value}) == len(enum.value):
             enum.options.ClearField('allow_alias')
-        
+
         blocks[enum.name] = wrap_block('enum', out2, enum)
-    
+
     if is_msg and desc.options.map_entry:
-        return ' map<%s>' % ', '.join(min_name(i.type_name, scopes) \
-            if i.type_name else types[i.type] \
-                for i in desc.field)
-    
+        return f" map<{', '.join(min_name(i.type_name, scopes) if i.type_name else types[i.type] for i in desc.field)}>"
+
+    out = ''
     if is_msg:
         for field in desc.field:
             out += fmt_field(field, scopes, blocks, syntax)
-        
+
         for index, oneof in enumerate(desc.oneof_decl):
             out += wrap_block('oneof', blocks.pop('_oneof_%d' % index), oneof)
-        
+
         out += fmt_ranges('extensions', desc.extension_range)
         out += fmt_ranges('reserved', [*desc.reserved_range, *desc.reserved_name])
-    
+
     else:
         for service in desc.service:
-            out2 = ''
-            for method in service.method:
-                out2 += 'rpc %s(%s%s) returns (%s%s);\n' % (method.name,
+            out2 = ''.join(
+                'rpc %s(%s%s) returns (%s%s);\n'
+                % (
+                    method.name,
                     'stream ' * method.client_streaming,
                     min_name(method.input_type, scopes),
                     'stream ' * method.server_streaming,
-                    min_name(method.output_type, scopes))
-            
+                    min_name(method.output_type, scopes),
+                )
+                for method in service.method
+            )
             out += wrap_block('service', out2, service)
-    
+
     extendees = OrderedDict()
     for ext in desc.extension:
         extendees.setdefault(ext.extendee, '')
         extendees[ext.extendee] += fmt_field(ext, scopes, blocks, syntax, True)
-    
+
     for name, value in blocks.items():
         out += value[:-1]
-    
+
     for name, fields in extendees.items():
         out += wrap_block('extend', fields, name=min_name(name, scopes))
-    
+
     out = wrap_block('message' * is_msg, out, desc)
     return out
 
@@ -118,14 +119,16 @@ def fmt_value(val, options=None, desc=None, optarr=[]):
             val = desc.enum_type.values_by_number[val].name
         val = str(val)
     else:
-        val = '"%s"' % val.encode('unicode_escape').decode('utf8')
-    
+        val = f""""{val.encode('unicode_escape').decode('utf8')}\""""
+
     if options:
         opts = [*optarr]
-        for (option, value) in options.ListFields():
-            opts.append('%s = %s' % (option.name, fmt_value(value, desc=option)))
+        opts.extend(
+            '%s = %s' % (option.name, fmt_value(value, desc=option))
+            for option, value in options.ListFields()
+        )
         if opts:
-            val += ' [%s]' % ', '.join(opts)
+            val += f" [{', '.join(opts)}]"
     return val
 
 types = {v: k.split('_')[1].lower() for k, v in FieldDescriptorProto.Type.items()}
@@ -133,34 +136,39 @@ labels = {v: k.split('_')[1].lower() for k, v in FieldDescriptorProto.Label.item
 
 def fmt_field(field, scopes, blocks, syntax, extend=False):
     type_ = types[field.type]
-    
+
     default = ''
     if field.default_value:
         if field.type == field.TYPE_STRING:
-            default = ['default = %s' % fmt_value(field.default_value)]
+            default = [f'default = {fmt_value(field.default_value)}']
         elif field.type == field.TYPE_BYTES:
-            default = ['default = "%s"' % field.default_value]
+            default = [f'default = "{field.default_value}"']
         else:
             # Guess whether it ought to be more readable as base 10 or 16,
             # based on the presence of repeated digits:
-            
-            if ('int' in type_ or 'fixed' in type_) and \
-               int(field.default_value) >= 0x10000 and \
-               not any(len(list(i)) > 3 for _, i in groupby(str(field.default_value))):
-                
+
+            if (
+                ('int' in type_ or 'fixed' in type_)
+                and int(field.default_value) >= 0x10000
+                and all(
+                    len(list(i)) <= 3
+                    for _, i in groupby(str(field.default_value))
+                )
+            ):
+
                 field.default_value = hex(int(field.default_value))
-            
-            default = ['default = %s' % field.default_value]
-    
+
+            default = [f'default = {field.default_value}']
+
     out = ''
     if field.type_name:
         type_ = min_name(field.type_name, scopes)
         short_type = type_.split('.')[-1]
-        
+
         if short_type in blocks and ((not extend and not field.HasField('oneof_index')) or \
                                       blocks[short_type].startswith(' map<')):
             out += blocks.pop(short_type)[1:]
-    
+
     if out.startswith('map<'):
         line = out + ' %s = %s;\n' % (field.name, fmt_value(field.number, field.options, optarr=default))
         out = ''
@@ -169,18 +177,17 @@ def fmt_field(field, scopes, blocks, syntax, extend=False):
     else:
         line = '%s group %s = %d ' % (labels[field.label], type_, field.number)
         out = out.split(' ', 2)[-1]
-    
+
     if field.HasField('oneof_index') or (syntax == 'proto3' and line.startswith('optional')):
         line = line.split(' ', 1)[-1]
     if out:
         line = '\n' + line
-    
-    if field.HasField('oneof_index'):
-        blocks.setdefault('_oneof_%d' % field.oneof_index, '')
-        blocks['_oneof_%d' % field.oneof_index] += line + out
-        return ''
-    else:
+
+    if not field.HasField('oneof_index'):
         return line + out
+    blocks.setdefault('_oneof_%d' % field.oneof_index, '')
+    blocks['_oneof_%d' % field.oneof_index] += line + out
+    return ''
 
 """
     Find the smallest name to refer to another message from our scopes.
@@ -204,14 +211,11 @@ def min_name(name, scopes):
     return '.'.join(short_name)
 
 def wrap_block(type_, value, desc=None, name=None):
-    out = ''
-    if type_:
-        out = '\n%s %s {\n' % (type_, name or desc.name)
-    
+    out = '\n%s %s {\n' % (type_, name or desc.name) if type_ else ''
     if desc:
         for (option, optval) in desc.options.ListFields():
             value = 'option %s = %s;\n' % (option.name, fmt_value(optval, desc=option)) + value
-    
+
     value = value.replace('\n\n\n', '\n\n')
     if type_:
         out += '\n'.join(INDENT + line for line in value.strip('\n').split('\n'))
@@ -232,9 +236,7 @@ def fmt_ranges(name, ranges):
             text.append(fmt_value(range_.start))
         else:
             text.append(fmt_value(range_))
-    if text:
-        return '\n%s %s;\n' % (name, ', '.join(text))
-    return ''
+    return '\n%s %s;\n' % (name, ', '.join(text)) if text else ''
 
 
 # Fulfilling a blatant lack of the Python language.

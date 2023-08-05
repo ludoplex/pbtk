@@ -85,8 +85,8 @@ def assert_installed(win=None, modules=[], binaries=[]):
         for subject, names in missing.items():
             if len(names) == 1:
                 subject = {'modules': 'module', 'binaries': 'binary'}[subject]
-            msg.append('%s "%s"' % (subject, '", "'.join(names)))
-        msg = 'You are missing the %s for this.' % ' and '.join(msg)
+            msg.append(f"""{subject} "{'", "'.join(names)}\"""")
+        msg = f"You are missing the {' and '.join(msg)} for this."
         if win:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.warning(win, ' ', msg)
@@ -96,26 +96,26 @@ def assert_installed(win=None, modules=[], binaries=[]):
 
 def insert_endpoint(base_path, obj):
     url = obj['request']['url']
-    path = base_path / (urlparse(url).hostname + '.json')
-    
+    path = base_path / f'{urlparse(url).hostname}.json'
+
     json = []
     if exists(str(path)):
         with open(str(path)) as fd:
             json = load(fd, object_pairs_hook=OrderedDict)
-    
+
     # Try to merge objects
     inserted = False
     for obj2 in json:
         if obj2['request']['url'] == obj['request']['url'] and \
            obj2['request'].get('pb_param') == obj['request'].get('pb_param'):
-            
+
             # Try to merge data samples
             if 'samples' in obj2['request'] and 'samples' in obj['request']:
-                
+
                 if obj2['request']['transport'] == 'pburl_private':
                     new_samples = []
                     lite_samples = []
-                    
+
                     for i in obj2['request']['samples'] + obj['request'].pop('samples'):
                         # Simplify Protobuf-URL payloads
                         lite = {k: sub('(!\d+[^esz]|!\d+s(?=\d+|0x[a-f0-9]+:0x[a-f0-9]+(!|$)))[^!]+', r'\1', v)
@@ -124,23 +124,23 @@ def insert_endpoint(base_path, obj):
                         if lite not in lite_samples:
                             new_samples.append(i)
                         lite_samples.append(lite)
-                    
+
                     obj2['request']['samples'] = new_samples
-                
+
                 else:
                     for sample in obj['request'].pop('samples'):
                         if sample not in obj2['request']['samples']:
                             obj2['request']['samples'].append(sample)
-            
+
             obj2['request'].update(obj['request'])
             if 'response' in obj:
                 obj2['response'] = obj['response']
             inserted = True
             break
-    
+
     if not inserted:
         json.append(obj)
-    
+
     makedirs(str(path.parent), exist_ok=True)
     with open(str(path), 'w') as fd:
         dump(json, fd, ensure_ascii=False, indent=4)
@@ -149,44 +149,60 @@ def insert_endpoint(base_path, obj):
 
 def load_proto_msgs(proto_path, ret_source_info=False):
     # List imports that we need to specify to protoc for the necessary *_pb2.py to be generated
-    
+
     proto_dir = Path(proto_path).parent
     arg_proto_path = proto_dir
     arg_proto_files = []
     to_import = [str(proto_path)]
-    
+
     while to_import:
         next_import = to_import.pop()
         while not exists(str(arg_proto_path / next_import)) and arg_proto_path.name:
             arg_proto_path = arg_proto_path.parent
         next_import = str(arg_proto_path / next_import)
-        
+
         if next_import not in arg_proto_files:
             arg_proto_files.insert(0, next_import)
             with open(next_import) as fd:
-                for prior_import in reversed(findall('import(?:\s*weak|public)?\s*"(.+?)"\s*;', fd.read())):
-                    to_import.append(prior_import)
-    
+                to_import.extend(
+                    iter(
+                        reversed(
+                            findall(
+                                'import(?:\s*weak|public)?\s*"(.+?)"\s*;',
+                                fd.read(),
+                            )
+                        )
+                    )
+                )
     # Execute protoc and import the actual module from a tmp
-    
+
     with TemporaryDirectory() as arg_python_out:
-        args = [protoc, '--proto_path=%s' % arg_proto_path, '--python_out=' + arg_python_out, *arg_proto_files]
+        args = [
+            protoc,
+            f'--proto_path={arg_proto_path}',
+            f'--python_out={arg_python_out}',
+            *arg_proto_files,
+        ]
         if ret_source_info:
-            args += ['-o%s' % (Path(arg_python_out) / 'desc_info'), '--include_source_info', '--include_imports']
-        
+            args += [
+                f"-o{Path(arg_python_out) / 'desc_info'}",
+                '--include_source_info',
+                '--include_imports',
+            ]
+
         cmd = run(args, stderr=PIPE)
         if cmd.returncode:
             raise ValueError(cmd.stderr.decode('utf8'))
-        
+
         if ret_source_info:
             from google.protobuf.descriptor_pb2 import FileDescriptorSet
 
             with open(str(Path(arg_python_out) / 'desc_info'), 'rb') as fd:
                 yield FileDescriptorSet.FromString(fd.read()), arg_proto_path
                 return
-        
+
         # Do actual import
-        
+
         module_name = str(proto_dir).replace(str(arg_proto_path), '').strip('/\\').replace(sep, '.')
         if module_name:
             module_name += '.'
@@ -196,7 +212,7 @@ def load_proto_msgs(proto_path, ret_source_info=False):
         module = import_module(module_name)
         reload(module)
         PATH.remove(arg_python_out)
-    
+
     # Recursively iterate over class members to list Protobuf messages
 
     yield from iterate_proto_msg(module, '')
@@ -213,35 +229,31 @@ def extractor_save(base_path, folder, outputs):
     nb_written = 0
     name_to_path = {}
     wrote_endpoints = False
-    
+
     for name, contents in outputs:
         if '.proto' in name:
-            if folder:
-                path = base_path / 'protos' / folder / name
-            else:
-                path = base_path / name
-            
+            path = base_path / 'protos' / folder / name if folder else base_path / name
             makedirs(str(path.parent), exist_ok=True)
             with open(str(path), 'w') as fd:
                 fd.write(contents)
-            
+
             if name not in name_to_path:
                 nb_written += 1
             name_to_path[name] = str(path)
-        
+
         elif name.endswith('.sample'):
             endpoint = contents
-            
+
             name = name.replace('.sample', '.proto')
             endpoint['proto_path'] = name_to_path[name]
             endpoint['proto_msg'] = name.replace('.proto', '')
-            
+
             wrote_endpoints = True
             if folder:
                 insert_endpoint(base_path / 'endpoints', {'request': endpoint})
             else:
                 insert_endpoint(base_path, {'request': endpoint})
-    
+
     return nb_written, wrote_endpoints
 
 # CLI entry point when calling an extractor as an individual script

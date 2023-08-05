@@ -60,17 +60,22 @@ def pburl_extract(url):
     endpoints = []
     sid_to_vars = {}
     proto_to_urls = OrderedDict()
-    
+
     port = randint(1024, 32767)
     temp_profile = True
-    
+
     yield '_progress', ('Opening a browser window...\n(Your activity from the first tab will be captured, until you close it)', None)
-    
+
     with TemporaryDirectory() as profile:
         cmd = [browser, '--remote-debugging-port=%d' % port, 'about:blank']
-        if temp_profile == True:
-            cmd += ['--user-data-dir=' + profile, '--no-first-run', '--start-maximized', '--no-default-browser-check']
-        
+        if temp_profile:
+            cmd += [
+                f'--user-data-dir={profile}',
+                '--no-first-run',
+                '--start-maximized',
+                '--no-default-browser-check',
+            ]
+
         chrome = Popen(cmd, stdout=DEVNULL, stderr=DEVNULL)
 
         try:
@@ -81,21 +86,21 @@ def pburl_extract(url):
                     break
                 except OSError:
                     sleep(0.1)
-            
+
             from websocket import WebSocketApp
-            
+
             getLogger('websocket').setLevel(DEBUG)
             ws = WebSocketApp(tab['webSocketDebuggerUrl'],
                               on_message=on_message,
                               on_open=on_open).run_forever()
-        
+
         finally:
             # Make sure that Chromium is killed when quitting by error
             chrome.terminate()
-            
+
             # Avoid race condition with it writing to profile directory
             sleep(0.2)
-    
+
     for proto in list(proto_to_urls):
         # Determine .proto name based on endpoint URL
         pbname = min(proto_to_urls[proto], key=len)
@@ -113,17 +118,22 @@ def pburl_extract(url):
         while pbname in proto_to_urls:
             tries += 1
             pbname = pbname_ + str(tries)
-        
+
         # Save generated .proto to ~/.pbtk
         if len(pbname) == 1:
-            yield pbname + '.proto', proto.replace('message Top', 'message ' + pbname).replace('Top', '.' + pbname)
+            yield (
+                f'{pbname}.proto',
+                proto.replace('message Top', f'message {pbname}').replace(
+                    'Top', f'.{pbname}'
+                ),
+            )
         else:
-            yield pbname + '.proto', proto.replace('Top', pbname)
+            yield (f'{pbname}.proto', proto.replace('Top', pbname))
         proto_to_urls[pbname] = proto_to_urls[proto]
         del proto_to_urls[proto]
-        
+
         print(pbname, '=>', proto_to_urls[pbname])
-    
+
     # Save endpoint to ~/.pbtk
     for sample in endpoints:
         yield next(k for k, v in proto_to_urls.items() if sample['url'] in v) + '.sample', sample
@@ -146,15 +156,15 @@ def send(ws, call, params=None, data=None):
 def on_message(ws, msg):
     global seen_scripts
     msg = loads(msg)
-    
+
     if 'method' in msg:
         call, msg = msg['method'], msg['params']
-        
+
         if call == 'Network.requestWillBeSent':
             msg = msg['request']
             if '=!' in msg['url'] or search('&[0-9]', msg['url']):
                 logUrl(msg['url'])
-        
+
         elif call == 'Runtime.executionContextCreated':
             seen_scripts = set()
             send(ws, 'Runtime.evaluate', {'expression': '''
@@ -169,29 +179,32 @@ var wrap = function(orig) {
     };
 };
 history.replaceState = wrap(history.replaceState);'''})
-        
+
         elif call == 'Debugger.scriptParsed':
             myId = (msg['url'], msg['startLine'], msg['startColumn'])
-            if myId not in seen_scripts and not (msg['startLine'] == msg['endLine'] and msg['endColumn'] - msg['startColumn'] < 100):
+            if myId not in seen_scripts and (
+                msg['startLine'] != msg['endLine']
+                or msg['endColumn'] - msg['startColumn'] >= 100
+            ):
                 seen_scripts.add(myId)
                 awaiting_srcs.append(msg['scriptId'])
                 send(ws, 'Debugger.pause')
                 send(ws, 'Debugger.getScriptSource', {'scriptId': msg['scriptId']},
                     (msg['scriptId'], '\n' * msg['startLine'] + ' ' * msg['startColumn']))
-        
+
         elif call == 'Debugger.paused':
-            loc = msg['callFrames'][0]['location']
-            
             if msg['hitBreakpoints'] and msg['reason'] == 'other' and msg['callFrames']:
                 send(ws, 'Debugger.pause')
+                loc = msg['callFrames'][0]['location']
+
                 messageSpecStringVar, nestedMessagesSpecArrayVar = sid_to_vars[loc['scriptId']]
-                
+
                 # Converting the Protobuf structure object into JSON
                 # isn't possible since it has circular references, and
                 # accessing variables individually through the API is
                 # very slow, so conversion to text is done on the
                 # JavaScript side.
-                
+
                 send(ws, 'Debugger.evaluateOnCallFrame', {
                     'callFrameId': msg['callFrames'][0]['callFrameId'],
                     'expression': '''
@@ -315,7 +328,7 @@ history.replaceState = wrap(history.replaceState);'''})
     }
 })();''' % (messageSpecStringVar, nestedMessagesSpecArrayVar)
                 })
-            
+
             if not awaiting_srcs:
                 send(ws, 'Debugger.resume')
 
@@ -325,9 +338,9 @@ history.replaceState = wrap(history.replaceState);'''})
                 logUrl(loads(msg)[1])
             elif '__HOOK' in msg:
                 proto, protoMsg = loads(msg)[1]
-                
+
                 proto = 'syntax = "proto3";\n\n' + proto
-                
+
                 if protoMsg:
                     sent_msgs[protoMsg] = proto
                     sent_msgs[protoMsg.replace(' ', '+')] = proto
@@ -337,7 +350,7 @@ history.replaceState = wrap(history.replaceState);'''})
                     sent_msgs[quote_plus(protoMsg, safe='~()*!.')] = proto
                     sent_msgs[quote_plus(protoMsg, safe='~()*!.\'')] = proto
                     sent_msgs[quote_plus(protoMsg, safe='~()*!.\':')] = proto
-    
+
     elif 'error' in msg:
         req_id, error = msg['id'], msg['error']
         call, data = req_data.pop(req_id)
@@ -349,25 +362,25 @@ history.replaceState = wrap(history.replaceState);'''})
             if not awaiting_srcs:
                 send(ws, 'Debugger.resume')
             return
-        print('[Error]', call + ':', error)
+        print('[Error]', f'{call}:', error)
         exit()
-    
+
     else:
         req_id, msg = msg['id'], msg['result']
         call, data = req_data.pop(req_id)
-        
+
         if call == 'Debugger.getScriptSource':
             sid, padding = data
             src = padding + msg['scriptSource']
-            
+
             targets = ['0);c.length=a;return c.join("")}', '0);return c.join("")}', 'return c.join("&").replace(']
             for target in targets:
                 if target in src:
-                    
+
                     messageSpecStringVar, nestedMessagesSpecArrayVar = search('=a:\(this\.[\w$]+=a\.([\w$]+),this\.[\w$]+=a\.([\w$]+)\);(?:a=)?this\.', src).groups()
                     before = src.split(target)[0]
                     sid_to_vars[sid] = messageSpecStringVar, nestedMessagesSpecArrayVar
-                    
+
                     send(ws, 'Debugger.setBreakpoint', {
                         'location': {
                             'scriptId': sid,
@@ -376,7 +389,7 @@ history.replaceState = wrap(history.replaceState);'''})
                         }
                     })
                     print('[Script successfully hooked]')
-            
+
             awaiting_srcs.remove(sid)
             if not awaiting_srcs:
                 send(ws, 'Debugger.resume')
@@ -392,13 +405,13 @@ def logUrl(url):
     for data in sorted(datas, key=len, reverse=True):
         if data in sent_msgs:
             proto = sent_msgs[data]
-            
+
             url = url.replace('/pb=', '?pb=')
             if '?' not in url:
                 url += '?'
             url, qs = url.split('?')
 
-            if '=!' in url + '?' + qs:
+            if '=!' in f'{url}?{qs}':
                 qsl = OrderedDict(parse_qsl(qs, True))
                 for k, v in findall('/(space/|place/|search/|contrib/|[^/]+=|@)([^/]*)', url) +\
                             findall('/(dir/)([^/]*/[^/]*)', url):
@@ -407,10 +420,10 @@ def logUrl(url):
                         qsl[k2] = unquote_plus(v)
                         url = url.replace(k + v, k + '{' + k2 + '}')
                     else:
-                        qsl[k2+'1'], qsl[k2+'2'] = map(unquote_plus, v.split('/'))
+                        qsl[f'{k2}1'], qsl[f'{k2}2'] = map(unquote_plus, v.split('/'))
                         url = url.replace(k + v, k + '{%s1}/{%s2}' % (k2, k2))
                 qs = urlencode(qsl)
-                
+
                 pb_param = next(k for k, v in qsl.items() if v == unquote_plus(data))
                 endpoints.append({
                     'transport': 'pburl_private',
@@ -429,13 +442,13 @@ def logUrl(url):
                     'url': url,
                     'samples': [GMapsAPIPublic(None, url).serialize_sample(qs)]
                 })
-            
+
             print('[Captured]', url, qs, data)
             if proto not in proto_to_urls:
                 proto_to_urls[proto] = set()
             proto_to_urls[proto].add(url)
             return
-    
+
     print('[Not captured]', url, data, '/', 'across', '=>', sent_msgs)
 
 if __name__ == '__main__':

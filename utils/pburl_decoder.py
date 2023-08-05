@@ -47,46 +47,46 @@ def consume(obj, pb, sep):
         field = obj.pop(0)
         index, type_, val = match('(\d+)(\w)(.*)', field).groups()
         type_ = types_dec[type_]
-        
+
         if int(index) not in pb.DESCRIPTOR.fields_by_number:
-            warn('Unknown index: !' + field)
+            warn(f'Unknown index: !{field}')
             if type_ == fd.TYPE_MESSAGE:
                 del obj[:int(val)]
             continue
-        
+
         field = pb.DESCRIPTOR.fields_by_number[int(index)]
         repeated = field.label == field.LABEL_REPEATED
         field = field.name
-        
+
         if type_ == fd.TYPE_MESSAGE:
             if not repeated:
                 getattr(pb, field).SetInParent()
                 consume(obj[:int(val)], getattr(pb, field), sep)
             else:
                 consume(obj[:int(val)], getattr(pb, field).add(), sep)
-            
+
             del obj[:int(val)]
             continue
-        
+
         elif type_ == fd.TYPE_STRING:
             if sep == '!':
                 val = val.replace('*21', '!').replace('*2A', '*')
             else:
                 val = unquote(val)
-        
+
         elif type_ == fd.TYPE_BYTES:
             val = urlsafe_b64decode(val + '=' * (-len(val) % 4))
         elif type_ == "base64_string":
             val = urlsafe_b64decode(val + '=' * (-len(val) % 4)).decode('utf8')
-        
+
         elif type_ == fd.TYPE_BOOL:
             val = bool(int(val))
-        
+
         elif type_ in (fd.TYPE_DOUBLE, fd.TYPE_FLOAT):
             val = float(val)
         else:
             val = int(val)
-        
+
         if not repeated:
             setattr(pb, field, val)
         else:
@@ -136,17 +136,20 @@ if __name__ == '__main__':
     parser.add_argument('proto_file')
     parser.add_argument('proto_msg_name', nargs='?')
     args = parser.parse_args()
-    
+
     sep = '!' if args.pburl_data[0] == '!' else '&'
-    
-    msg = None
-    for name, cls in load_proto_msgs(args.proto_file):
-        if not args.proto_msg_name or args.proto_msg_name == name:
-            msg = cls()
-            break
+
+    msg = next(
+        (
+            cls()
+            for name, cls in load_proto_msgs(args.proto_file)
+            if not args.proto_msg_name or args.proto_msg_name == name
+        ),
+        None,
+    )
     if not msg:
         raise ValueError('Provided message name was not found in .proto.')
-    
+
     proto_url_decode(args.pburl_data, msg, sep)
-    
+
     print(msg)
