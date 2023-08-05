@@ -50,9 +50,7 @@ class Base64GET():
     
     def serialize_sample(self, sample):
         sample = OrderedDict(parse_qsl(sample))
-        if self.pb_param not in sample:
-            return False
-        return sample
+        return False if self.pb_param not in sample else sample
     
     def load_sample(self, sample, pb_msg):
         sample = OrderedDict(sample or {self.pb_param: ''})
@@ -128,13 +126,13 @@ class GMapsAPIPublic():
     
     def parse_qs(self, sample):
         pb = match('(?:&?\d[^&=]+)*', sample)
-        return OrderedDict([(pb.group(0), ''),
-                            *parse_qsl(sample[pb.end() + 1:], True)])
+        return OrderedDict([(pb[0], ''), *parse_qsl(sample[pb.end() + 1:], True)])
     
     def rebuild_qs(self, sample):
-        return '&'.join(k if not k or k[0].isdigit() else
-                        my_quote(k) + '=' + my_quote(v)
-                        for k, v in sample.items())
+        return '&'.join(
+            k if not k or k[0].isdigit() else f'{my_quote(k)}={my_quote(v)}'
+            for k, v in sample.items()
+        )
     
     def load_sample(self, sample, pb_msg):
         sample = self.parse_qs(sample)
@@ -150,8 +148,10 @@ class GMapsAPIPublic():
     def perform_request(self, pb_data, tab_data):
         params = OrderedDict({proto_url_encode(pb_data, '&'): ''})
         params.update(tab_data)
-        params['token'] = self.hash_token(urlparse(self.url).path + '?' + self.rebuild_qs(params))
-        return get(self.url + '?' + self.rebuild_qs(params), headers=USER_AGENT)
+        params['token'] = self.hash_token(
+            f'{urlparse(self.url).path}?{self.rebuild_qs(params)}'
+        )
+        return get(f'{self.url}?{self.rebuild_qs(params)}', headers=USER_AGENT)
     
     def hash_token(self, url):
         if not hasattr(self, 'token'):
